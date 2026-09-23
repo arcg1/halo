@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { VModal } from '@halo-dev/components'
+import { computed, nextTick, ref } from 'vue'
 import { BUILTIN_DRAWS } from '@/domain/history'
 import {
   PRIZE_ODDS,
@@ -21,7 +22,17 @@ const predictions = ref(initial.predictions)
 const learningRate = ref(initial.learningRate)
 const message = ref('')
 const showDataPanel = ref(false)
+const dataModal = ref<InstanceType<typeof VModal> | null>(null)
+const dataButton = ref<HTMLButtonElement | null>(null)
 const importText = ref('')
+const historyQuery = ref('')
+const historyYear = ref('')
+const historyPage = ref(1)
+const historyPageSize = 20
+const selectedChartStartDate = ref('')
+const selectedChartEndDate = ref('')
+const visibleChartSeries = ref([true, true, true, true, true, true, true])
+const hoveredChartIssue = ref<string | null>(null)
 
 const currentIssue = computed(() => nextIssue(draws.value[0]?.issue ?? ''))
 const currentSnapshot = computed(() =>
@@ -46,30 +57,119 @@ const tuningControls: { key: keyof ModelWeights; label: string; help: string }[]
   { key: 'exploration', label: '探索强度', help: '候选之间保留多少随机差异' },
 ]
 
-const chartDraws = computed(() => draws.value.slice(0, 30).reverse())
+const chartStartDate = computed({
+  get: () =>
+    selectedChartStartDate.value || draws.value[Math.min(29, draws.value.length - 1)]?.date || '',
+  set: (date: string) => {
+    selectedChartStartDate.value = date
+    hoveredChartIssue.value = null
+  },
+})
+const chartEndDate = computed({
+  get: () => selectedChartEndDate.value || draws.value[0]?.date || '',
+  set: (date: string) => {
+    selectedChartEndDate.value = date
+    hoveredChartIssue.value = null
+  },
+})
+const chartRangeInvalid = computed(() => chartStartDate.value > chartEndDate.value)
+const chartDraws = computed(() =>
+  chartRangeInvalid.value
+    ? []
+    : draws.value
+        .filter((draw) => draw.date >= chartStartDate.value && draw.date <= chartEndDate.value)
+        .reverse(),
+)
+const hoveredChartDraw = computed(() =>
+  chartDraws.value.find((draw) => draw.issue === hoveredChartIssue.value),
+)
+const hoveredChartIndex = computed(() =>
+  chartDraws.value.findIndex((draw) => draw.issue === hoveredChartIssue.value),
+)
+const historyYears = computed(() =>
+  [...new Set(draws.value.map((draw) => draw.date.slice(0, 4)))].sort((a, b) => b.localeCompare(a)),
+)
+const filteredHistory = computed(() => {
+  const query = historyQuery.value.trim()
+  return draws.value.filter(
+    (draw) =>
+      (!historyYear.value || draw.date.startsWith(historyYear.value)) &&
+      (!query || draw.issue.includes(query) || draw.date.includes(query)),
+  )
+})
+const historyPageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredHistory.value.length / historyPageSize)),
+)
+const visibleHistoryPage = computed(() => Math.min(historyPage.value, historyPageCount.value))
+const visibleHistory = computed(() =>
+  filteredHistory.value.slice(
+    (visibleHistoryPage.value - 1) * historyPageSize,
+    visibleHistoryPage.value * historyPageSize,
+  ),
+)
 const chartSeries = computed(() => {
   const colors = ['#ef4444', '#f97316', '#eab308', '#16a34a', '#8b5cf6', '#ec4899']
   const redSeries = colors.map((color, position) => ({
     color,
-    points: chartDraws.value
-      .map((draw, index) => chartPoint(index, draw.reds[position] ?? 1, chartDraws.value.length))
-      .join(' '),
+    label: `红球第 ${position + 1} 位`,
+    values: chartDraws.value.map((draw) => draw.reds[position] ?? 1),
   }))
   return [
     ...redSeries,
     {
       color: '#2563eb',
-      points: chartDraws.value
-        .map((draw, index) => chartPoint(index, draw.blue, chartDraws.value.length))
-        .join(' '),
+      label: '蓝球',
+      values: chartDraws.value.map((draw) => draw.blue),
     },
-  ]
+  ].map((series) => ({
+    ...series,
+    points: series.values
+      .map((number, index) => chartPoint(index, number, chartDraws.value.length))
+      .join(' '),
+  }))
 })
 
+function chartX(index: number, length: number) {
+  return length === 1 ? 450 : 42 + (index * 816) / Math.max(1, length - 1)
+}
+
+function chartY(number: number) {
+  return 246 - ((number - 1) * 216) / 32
+}
+
 function chartPoint(index: number, number: number, length: number) {
-  const x = 42 + (index * 816) / Math.max(1, length - 1)
-  const y = 246 - ((number - 1) * 216) / 32
-  return `${x.toFixed(1)},${y.toFixed(1)}`
+  return `${chartX(index, length).toFixed(1)},${chartY(number).toFixed(1)}`
+}
+
+function showLatestChartDraws() {
+  selectedChartStartDate.value = ''
+  selectedChartEndDate.value = ''
+  hoveredChartIssue.value = null
+}
+
+function toggleChartSeries(index: number) {
+  visibleChartSeries.value = visibleChartSeries.value.map((visible, position) =>
+    position === index ? !visible : visible,
+  )
+}
+
+function handleChartPointer(event: MouseEvent) {
+  const svg = (event.currentTarget as SVGRectElement).ownerSVGElement
+  const bounds = svg?.getBoundingClientRect()
+  if (!bounds?.width || !chartDraws.value.length) return
+  const x = ((event.clientX - bounds.left) / bounds.width) * 900
+  const index = Math.round(
+    ((Math.max(42, Math.min(858, x)) - 42) / 816) * (chartDraws.value.length - 1),
+  )
+  hoveredChartIssue.value = chartDraws.value[index]?.issue ?? null
+}
+
+function stepChartHover(direction: number) {
+  const last = chartDraws.value.length - 1
+  if (last < 0) return
+  const current = hoveredChartIndex.value < 0 ? last : hoveredChartIndex.value
+  hoveredChartIssue.value =
+    chartDraws.value[Math.max(0, Math.min(last, current + direction))]?.issue ?? null
 }
 
 function persist() {
@@ -208,7 +308,7 @@ function resetAll() {
   learningRate.value = reset.learningRate
   form.value.issue = nextIssue(BUILTIN_DRAWS[0]?.issue ?? '')
   persist()
-  message.value = '已恢复内置的 100 期样本和默认参数'
+  message.value = `已恢复内置的 ${BUILTIN_DRAWS.length} 期样本和默认参数`
 }
 
 function formatOdds(combinations: number) {
@@ -217,6 +317,16 @@ function formatOdds(combinations: number) {
 
 function ball(number: number) {
   return String(number).padStart(2, '0')
+}
+
+function openDataModal() {
+  message.value = ''
+  showDataPanel.value = true
+}
+
+function handleDataModalClose() {
+  showDataPanel.value = false
+  nextTick(() => dataButton.value?.focus())
 }
 
 generatePrediction()
@@ -232,11 +342,12 @@ generatePrediction()
       </div>
       <div class="hero-actions">
         <button
+          ref="dataButton"
           class="button button-secondary"
           type="button"
-          @click="showDataPanel = !showDataPanel"
+          @click="openDataModal"
         >
-          {{ showDataPanel ? '收起数据管理' : '数据管理' }}
+          数据管理
         </button>
         <button class="button button-primary" type="button" @click="generatePrediction(true)">
           重新生成
@@ -249,7 +360,7 @@ generatePrediction()
       >双色球每次开奖相互独立，历史走势不能提高单注的理论中奖概率。这里的“模型分数”只用于候选排序，不是中奖概率，也不构成购彩建议。
     </div>
 
-    <p v-if="message" class="message" role="status">{{ message }}</p>
+    <p v-if="message && !showDataPanel" class="message" role="status">{{ message }}</p>
 
     <section class="stats-grid">
       <article class="stat-card">
@@ -258,7 +369,7 @@ generatePrediction()
       </article>
       <article class="stat-card">
         <span>历史样本</span><strong>{{ draws.length }} 期</strong
-        ><small>{{ draws.at(-1)?.date }} — {{ draws[0]?.date }}</small>
+        ><small>{{ draws[draws.length - 1]?.date }} — {{ draws[0]?.date }}</small>
       </article>
       <article class="stat-card">
         <span>一等奖理论概率</span><strong>1 / 17,721,088</strong><small>任意一注都相同</small>
@@ -301,48 +412,162 @@ generatePrediction()
       <article class="panel chart-panel">
         <div class="panel-heading">
           <div>
-            <p class="section-kicker">LAST 30 DRAWS</p>
+            <p class="section-kicker">DRAW DATE RANGE</p>
             <h2>历史号码折线图</h2>
           </div>
-          <div class="legend">
-            <span class="red-dot"></span>红球 1–6 <span class="blue-dot"></span>蓝球
+          <div class="chart-controls">
+            <label class="chart-date-control">
+              <span>开始日期</span>
+              <input
+                v-model="chartStartDate"
+                type="date"
+                aria-label="图表开始日期"
+                :min="draws[draws.length - 1]?.date"
+                :max="draws[0]?.date"
+              />
+            </label>
+            <label class="chart-date-control">
+              <span>截至日期</span>
+              <input
+                v-model="chartEndDate"
+                type="date"
+                aria-label="图表截止日期"
+                :min="draws[draws.length - 1]?.date"
+                :max="draws[0]?.date"
+              />
+            </label>
+            <button
+              class="button button-secondary"
+              type="button"
+              :disabled="!selectedChartStartDate && !selectedChartEndDate"
+              @click="showLatestChartDraws"
+            >
+              最近 30 期
+            </button>
           </div>
         </div>
-        <svg
-          class="trend-chart"
-          viewBox="0 0 900 280"
-          role="img"
-          aria-label="最近 30 期双色球号码走势"
-        >
-          <line
-            v-for="tick in [1, 8, 16, 24, 33]"
-            :key="tick"
-            x1="42"
-            x2="858"
-            :y1="chartPoint(0, tick, 1).split(',')[1]"
-            :y2="chartPoint(0, tick, 1).split(',')[1]"
-            class="grid-line"
-          />
-          <text
-            v-for="tick in [1, 8, 16, 24, 33]"
-            :key="`label-${tick}`"
-            x="8"
-            :y="Number(chartPoint(0, tick, 1).split(',')[1]) + 4"
-            class="axis-label"
-          >
-            {{ tick }}
-          </text>
-          <polyline
+        <div class="chart-legend" aria-label="号码折线显示设置">
+          <button
             v-for="(series, index) in chartSeries"
-            :key="index"
-            :points="series.points"
-            :stroke="series.color"
-            :class="['series', { 'blue-series': index === 6 }]"
-          />
-        </svg>
-        <div class="chart-footer">
-          <span>{{ chartDraws[0]?.issue }}</span
-          ><span>{{ chartDraws.at(-1)?.issue }}</span>
+            :key="series.label"
+            class="chart-series-toggle"
+            :class="{ 'is-hidden': !visibleChartSeries[index] }"
+            type="button"
+            :aria-pressed="visibleChartSeries[index] ?? false"
+            @click="toggleChartSeries(index)"
+          >
+            <span
+              class="chart-series-swatch"
+              :style="{ backgroundColor: visibleChartSeries[index] ? series.color : '#cbd5e1' }"
+            ></span>
+            {{ series.label }}
+          </button>
+        </div>
+        <p class="chart-hint">
+          共 {{ chartDraws.length }} 期 · 红球线按号码从小到大排序 ·
+          悬停查看，聚焦后可用左右方向键逐期切换
+        </p>
+        <div v-if="chartDraws.length" class="chart-plot" @mouseleave="hoveredChartIssue = null">
+          <svg
+            class="trend-chart"
+            viewBox="0 0 900 280"
+            role="group"
+            :aria-label="`${chartStartDate} 至 ${chartEndDate} 的 ${chartDraws.length} 期双色球号码走势`"
+          >
+            <line
+              v-for="tick in [1, 8, 16, 24, 33]"
+              :key="tick"
+              x1="42"
+              x2="858"
+              :y1="chartY(tick)"
+              :y2="chartY(tick)"
+              class="grid-line"
+            />
+            <text
+              v-for="tick in [1, 8, 16, 24, 33]"
+              :key="`label-${tick}`"
+              x="8"
+              :y="chartY(tick) + 4"
+              class="axis-label"
+            >
+              {{ tick }}
+            </text>
+            <template v-for="(series, index) in chartSeries" :key="series.label">
+              <polyline
+                v-if="visibleChartSeries[index]"
+                :points="series.points"
+                :stroke="series.color"
+                :class="['series', { 'blue-series': index === 6 }]"
+              />
+            </template>
+            <template v-for="(series, seriesIndex) in chartSeries" :key="seriesIndex">
+              <circle
+                v-for="(number, drawIndex) in visibleChartSeries[seriesIndex] &&
+                chartDraws.length <= 120
+                  ? series.values
+                  : []"
+                :key="drawIndex"
+                :cx="chartX(drawIndex, chartDraws.length)"
+                :cy="chartY(number)"
+                r="2.5"
+                :fill="series.color"
+                class="chart-dot"
+              />
+            </template>
+            <line
+              v-if="hoveredChartIndex >= 0"
+              :x1="chartX(hoveredChartIndex, chartDraws.length)"
+              :x2="chartX(hoveredChartIndex, chartDraws.length)"
+              y1="26"
+              y2="246"
+              class="chart-hover-guide"
+            />
+            <rect
+              x="42"
+              y="24"
+              width="816"
+              height="224"
+              class="chart-hit-area"
+              role="slider"
+              tabindex="0"
+              aria-label="查看图表中的开奖期数，使用左右方向键切换"
+              :aria-valuemin="1"
+              :aria-valuemax="chartDraws.length"
+              :aria-valuenow="hoveredChartIndex >= 0 ? hoveredChartIndex + 1 : chartDraws.length"
+              :aria-valuetext="
+                hoveredChartDraw
+                  ? `第 ${hoveredChartDraw.issue} 期 ${hoveredChartDraw.date}`
+                  : `第 ${chartDraws[chartDraws.length - 1]?.issue} 期`
+              "
+              @mouseenter="handleChartPointer"
+              @mousemove="handleChartPointer"
+              @click="handleChartPointer"
+              @focus="hoveredChartIssue = chartDraws[chartDraws.length - 1]?.issue ?? null"
+              @keydown.left.prevent="stepChartHover(-1)"
+              @keydown.right.prevent="stepChartHover(1)"
+            />
+          </svg>
+          <div v-if="hoveredChartDraw" class="chart-tooltip" aria-live="polite">
+            <strong>第 {{ hoveredChartDraw.issue }} 期</strong>
+            <time :datetime="hoveredChartDraw.date">{{ hoveredChartDraw.date }}</time>
+            <div class="balls chart-tooltip-balls">
+              <span v-for="number in hoveredChartDraw.reds" :key="number" class="ball red">{{
+                ball(number)
+              }}</span>
+              <span class="separator">+</span>
+              <span class="ball blue">{{ ball(hoveredChartDraw.blue) }}</span>
+            </div>
+          </div>
+        </div>
+        <p v-else class="chart-empty">
+          {{ chartRangeInvalid ? '开始日期不能晚于截至日期。' : '所选日期范围内没有开奖记录。' }}
+        </p>
+        <div v-if="chartDraws.length" class="chart-footer">
+          <span>第 {{ chartDraws[0]?.issue }} 期 · {{ chartDraws[0]?.date }}</span>
+          <span
+            >第 {{ chartDraws[chartDraws.length - 1]?.issue }} 期 ·
+            {{ chartDraws[chartDraws.length - 1]?.date }}</span
+          >
         </div>
       </article>
 
@@ -375,6 +600,69 @@ generatePrediction()
           回测逐期只使用当时之前的数据，避免把未来开奖结果泄漏给模型；样本较小，不代表未来表现。
         </p>
       </article>
+    </section>
+
+    <section class="panel history-panel">
+      <div class="panel-heading">
+        <div>
+          <p class="section-kicker">DRAW HISTORY</p>
+          <h2>历史开奖</h2>
+        </div>
+        <span class="model-badge">共 {{ filteredHistory.length }} 期</span>
+      </div>
+      <div class="history-filters">
+        <label>
+          <span>期号或开奖日期</span>
+          <input
+            v-model="historyQuery"
+            aria-label="搜索历史开奖期号或日期"
+            placeholder="例如：2003001、2026-09"
+            @input="historyPage = 1"
+          />
+        </label>
+        <label>
+          <span>开奖年份</span>
+          <select v-model="historyYear" aria-label="筛选开奖年份" @change="historyPage = 1">
+            <option value="">全部年份</option>
+            <option v-for="year in historyYears" :key="year" :value="year">{{ year }} 年</option>
+          </select>
+        </label>
+      </div>
+      <div v-if="visibleHistory.length" class="history-list">
+        <div v-for="draw in visibleHistory" :key="draw.issue" class="history-row">
+          <strong>第 {{ draw.issue }} 期</strong>
+          <time :datetime="draw.date">{{ draw.date }}</time>
+          <div class="balls history-balls" :aria-label="`第 ${draw.issue} 期开奖结果`">
+            <span v-for="number in draw.reds" :key="number" class="ball red">{{
+              ball(number)
+            }}</span>
+            <span class="separator">+</span>
+            <span class="ball blue">{{ ball(draw.blue) }}</span>
+          </div>
+        </div>
+      </div>
+      <p v-else class="history-empty">没有符合条件的开奖记录。</p>
+      <div v-if="filteredHistory.length > historyPageSize" class="history-pagination">
+        <span>第 {{ visibleHistoryPage }} / {{ historyPageCount }} 页</span>
+        <div>
+          <button
+            class="button button-secondary"
+            type="button"
+            :disabled="visibleHistoryPage === 1"
+            @click="historyPage = visibleHistoryPage - 1"
+          >
+            上一页
+          </button>
+          <button
+            class="button button-secondary"
+            type="button"
+            :disabled="visibleHistoryPage === historyPageCount"
+            @click="historyPage = visibleHistoryPage + 1"
+          >
+            下一页
+          </button>
+        </div>
+      </div>
     </section>
 
     <section class="two-column">
@@ -459,18 +747,23 @@ generatePrediction()
       </div>
     </section>
 
-    <section v-if="showDataPanel" class="panel data-panel">
-      <div class="panel-heading">
-        <div>
-          <p class="section-kicker">LOCAL DATA</p>
-          <h2>数据导入与备份</h2>
-        </div>
-      </div>
+    <VModal
+      v-if="showDataPanel"
+      ref="dataModal"
+      :width="720"
+      :body-class="['!overflow-auto']"
+      title="数据导入与备份"
+      mount-to-body
+      layer-closable
+      @close="handleDataModalClose"
+    >
       <p class="fine-print">
         每行格式：期号,日期,红1,红2,红3,红4,红5,红6,蓝球。数据与模型参数保存在当前浏览器；换设备前请导出备份。
       </p>
+      <p v-if="message" class="message data-message" role="status">{{ message }}</p>
       <textarea
         v-model="importText"
+        class="data-import-text"
         rows="6"
         placeholder="2026110,2026-09-22,01,05,09,16,22,31,08"
       ></textarea>
@@ -486,7 +779,12 @@ generatePrediction()
         /></label>
         <button class="button button-danger" type="button" @click="resetAll">恢复内置数据</button>
       </div>
-    </section>
+      <template #footer>
+        <button class="button button-secondary" type="button" @click="dataModal?.close()">
+          关闭
+        </button>
+      </template>
+    </VModal>
   </main>
 </template>
 
@@ -619,7 +917,7 @@ h2 {
 }
 .prediction-panel,
 .odds-panel,
-.data-panel {
+.history-panel {
   max-width: 1440px;
   box-sizing: border-box;
   margin: 0 auto 14px;
@@ -679,6 +977,81 @@ h2 {
 .ball.blue {
   background: linear-gradient(145deg, #60a5fa, #1d4ed8);
 }
+.history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.history-filters label {
+  display: flex;
+  flex: 1 1 220px;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 320px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+.history-filters select {
+  width: 100%;
+  border: 1px solid #dbe1ea;
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #172033;
+  background: white;
+}
+.history-filters select:focus {
+  border-color: #60a5fa;
+  outline: 3px solid rgb(96 165 250 / 15%);
+}
+.history-list {
+  border: 1px solid #e8ecf1;
+  border-radius: 10px;
+  overflow: hidden;
+}
+.history-row {
+  display: grid;
+  grid-template-columns: 120px 120px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+.history-row + .history-row {
+  border-top: 1px solid #eef1f4;
+}
+.history-row:nth-child(even) {
+  background: #f8fafc;
+}
+.history-row time {
+  color: #64748b;
+}
+.history-balls {
+  margin: 0;
+}
+.history-empty {
+  padding: 24px;
+  color: #64748b;
+  text-align: center;
+}
+.history-pagination,
+.history-pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.history-pagination {
+  justify-content: space-between;
+  margin-top: 16px;
+  color: #64748b;
+  font-size: 12px;
+}
+.history-pagination .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
 .separator {
   color: #cbd5e1;
   font-weight: 800;
@@ -700,6 +1073,62 @@ h2 {
   gap: 14px;
   max-width: 1440px;
   margin: 0 auto 14px;
+}
+.chart-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.chart-date-control {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 150px;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 700;
+}
+.chart-controls .button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+  transform: none;
+}
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.chart-series-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #dbe1ea;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #334155;
+  background: white;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.chart-series-toggle.is-hidden {
+  color: #94a3b8;
+  background: #f8fafc;
+  opacity: 0.65;
+}
+.chart-series-toggle:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+.chart-series-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.chart-plot {
+  position: relative;
 }
 .trend-chart {
   display: block;
@@ -724,25 +1153,66 @@ h2 {
   stroke-width: 2.4;
   opacity: 0.95;
 }
-.legend {
+.chart-dot,
+.chart-hover-guide {
+  pointer-events: none;
+}
+.chart-hover-guide {
+  stroke: #334155;
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+}
+.chart-hit-area {
+  fill: transparent;
+  cursor: crosshair;
+}
+.chart-hit-area:focus-visible {
+  outline: none;
+  stroke: #2563eb;
+  stroke-width: 2;
+}
+.chart-tooltip {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  right: 8px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 8px 24px rgb(15 23 42 / 12%);
+  pointer-events: none;
+}
+.chart-tooltip strong,
+.chart-tooltip time {
+  display: block;
+}
+.chart-tooltip strong {
+  font-size: 12px;
+}
+.chart-tooltip time {
+  margin-top: 3px;
   color: #64748b;
   font-size: 11px;
 }
-.red-dot,
-.blue-dot {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin: 0 5px 0 10px;
-  border-radius: 50%;
-  background: #ef4444;
+.chart-tooltip-balls {
+  margin: 8px 0 0;
 }
-.blue-dot {
-  background: #2563eb;
+.chart-hint {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 11px;
+}
+.chart-empty {
+  padding: 60px 12px;
+  color: #64748b;
+  text-align: center;
 }
 .chart-footer {
   display: flex;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
   padding-left: 38px;
   color: #94a3b8;
   font-size: 10px;
@@ -872,9 +1342,13 @@ textarea:focus {
   border-top: 1px solid #eef1f4;
   font-size: 12px;
 }
-.data-panel textarea {
+.data-import-text {
+  width: 100%;
   resize: vertical;
   font-family: ui-monospace, monospace;
+}
+.data-message {
+  margin: 10px 0;
 }
 .data-actions {
   margin-top: 12px;
@@ -904,6 +1378,14 @@ textarea:focus {
     align-items: stretch;
     flex-direction: column;
   }
+  .chart-panel .panel-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .chart-tooltip {
+    position: static;
+    margin: 8px 0;
+  }
   .stats-grid,
   .prediction-list {
     grid-template-columns: 1fr;
@@ -919,6 +1401,14 @@ textarea:focus {
   }
   .slider-row input {
     grid-column: 1 / -1;
+  }
+  .history-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+  .history-pagination {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 </style>

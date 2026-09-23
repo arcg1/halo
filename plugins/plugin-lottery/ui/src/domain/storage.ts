@@ -25,11 +25,12 @@ export function loadState(): StoredState {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return defaultState()
     const parsed = JSON.parse(raw) as Partial<StoredState>
+    const mergedDraws = new Map(BUILTIN_DRAWS.map((draw) => [draw.issue, structuredClone(draw)]))
+    if (Array.isArray(parsed.draws)) {
+      parsed.draws.forEach((draw) => mergedDraws.set(draw.issue, draw))
+    }
     return {
-      draws:
-        Array.isArray(parsed.draws) && parsed.draws.length
-          ? parsed.draws
-          : structuredClone(BUILTIN_DRAWS),
+      draws: [...mergedDraws.values()].sort((a, b) => b.issue.localeCompare(a.issue)),
       weights: { ...DEFAULT_WEIGHTS, ...parsed.weights },
       predictions: Array.isArray(parsed.predictions) ? parsed.predictions : [],
       learningRate:

@@ -93,15 +93,27 @@ function featureScore(feature: NumberFeatures, weights: ModelWeights) {
   )
 }
 
-function balanceScore(reds: number[], historicalSums: number[]) {
+interface BalanceReference {
+  lower: number
+  upper: number
+}
+
+function buildBalanceReference(draws: Draw[]): BalanceReference {
+  const sortedSums = draws
+    .map((draw) => draw.reds.reduce((sum, number) => sum + number, 0))
+    .sort((a, b) => a - b)
+  return {
+    lower: sortedSums[Math.floor(sortedSums.length * 0.15)] ?? 70,
+    upper: sortedSums[Math.floor(sortedSums.length * 0.85)] ?? 140,
+  }
+}
+
+function balanceScore(reds: number[], reference: BalanceReference) {
   const odds = reds.filter((number) => number % 2 === 1).length
   const lows = reds.filter((number) => number <= 16).length
   const sum = reds.reduce((total, number) => total + number, 0)
-  const sortedSums = [...historicalSums].sort((a, b) => a - b)
-  const lower = sortedSums[Math.floor(sortedSums.length * 0.15)] ?? 70
-  const upper = sortedSums[Math.floor(sortedSums.length * 0.85)] ?? 140
   const structure = 1 - (Math.abs(odds - 3) + Math.abs(lows - 3)) / 6
-  const sumFit = sum >= lower && sum <= upper ? 1 : 0.25
+  const sumFit = sum >= reference.lower && sum <= reference.upper ? 1 : 0.25
   const consecutivePairs = reds
     .slice(1)
     .filter((number, index) => number - (reds[index] ?? 0) === 1).length
@@ -144,7 +156,7 @@ export function predict(
   const blueFeatures = buildFeatures(draws, 'blue')
   const redScores = redFeatures.map((feature) => featureScore(feature, weights) + 0.15)
   const blueScores = blueFeatures.map((feature) => featureScore(feature, weights) + 0.15)
-  const historicalSums = draws.map((draw) => draw.reds.reduce((sum, number) => sum + number, 0))
+  const balanceReference = buildBalanceReference(draws)
   const random = randomFactory(seedText)
   const candidates: PredictionLine[] = []
 
@@ -155,7 +167,7 @@ export function predict(
     const reds = weightedSample(jitteredRedScores, 6, random)
     const blue = weightedSample(blueScores, 1, random)[0] ?? 1
     const signalScore = reds.reduce((sum, number) => sum + (redScores[number - 1] ?? 0), 0) / 6
-    const score = signalScore + balanceScore(reds, historicalSums) * weights.balance
+    const score = signalScore + balanceScore(reds, balanceReference) * weights.balance
     candidates.push({ reds, blue, score })
   }
 
@@ -208,17 +220,10 @@ export function fineTune(
       averageFeature(actual.reds, features, key) - averageFeature(chosen, features, key)
     next[key] = Math.max(0, Math.min(2.5, next[key] + signal * learningRate))
   }
-  const actualBalance = balanceScore(
-    actual.reds,
-    historyBeforeActual.map((draw) => draw.reds.reduce((a, b) => a + b, 0)),
-  )
+  const balanceReference = buildBalanceReference(historyBeforeActual)
+  const actualBalance = balanceScore(actual.reds, balanceReference)
   const predictedBalance = Math.max(
-    ...predicted.map((line) =>
-      balanceScore(
-        line.reds,
-        historyBeforeActual.map((draw) => draw.reds.reduce((a, b) => a + b, 0)),
-      ),
-    ),
+    ...predicted.map((line) => balanceScore(line.reds, balanceReference)),
   )
   next.balance = Math.max(
     0,

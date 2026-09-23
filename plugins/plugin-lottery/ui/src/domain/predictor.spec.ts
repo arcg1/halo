@@ -11,6 +11,27 @@ import {
 } from './predictor'
 
 describe('双色球预测模型', () => {
+  it('contains the complete draw history since the first issue', () => {
+    expect(BUILTIN_DRAWS.length).toBeGreaterThanOrEqual(3507)
+    expect(BUILTIN_DRAWS.at(-1)).toEqual({
+      issue: '2003001',
+      date: '2003-02-23',
+      reds: [10, 11, 12, 13, 26, 28],
+      blue: 11,
+    })
+    expect(new Set(BUILTIN_DRAWS.map((draw) => draw.issue)).size).toBe(BUILTIN_DRAWS.length)
+    expect(
+      BUILTIN_DRAWS.every(
+        (draw) =>
+          draw.reds.length === 6 &&
+          new Set(draw.reds).size === 6 &&
+          draw.reds.every((number) => number >= 1 && number <= 33) &&
+          draw.blue >= 1 &&
+          draw.blue <= 16,
+      ),
+    ).toBe(true)
+  })
+
   it('uses the official combination space and prize counts', () => {
     expect(TOTAL_COMBINATIONS).toBe(17_721_088)
     expect(PRIZE_ODDS.reduce((sum, prize) => sum + prize.combinations, 0)).toBe(1_188_988)
